@@ -80,10 +80,78 @@ void primer::add_read_count(uint32_t rc){
   read_count += rc;
 }
 
-
 void print_bed_format(){
   std::cout << "iVar uses the standard 6 column BED format as defined here - https://genome.ucsc.edu/FAQ/FAQformat.html#format1." << std::endl;
   std::cout << "It requires the following columns delimited by a tab: chrom, chromStart, chromEnd, name, score, strand" << std::endl;
+}
+
+std::vector<primer> populate_from_file(std::string path, int32_t offset = 0){
+  std::ifstream  data(path.c_str());
+  std::string line;
+  std::vector<primer> primers;
+  int16_t indice = 0;
+  while(std::getline(data,line)){ // Remove extra lineStream
+    std::stringstream lineStream(line);
+    std::string cell;
+    int ctr = 0;
+    primer p;
+    p.set_strand(0);		// Set strand to NULL
+    while(std::getline(lineStream,cell,'\t')){
+      switch(ctr){
+      case 0:
+	p.set_region(cell);
+	break;
+      case 1:
+	if(std::all_of(cell.begin(), cell.end(), ::isdigit)) {
+	  p.set_start(std::stoul(cell) - offset);
+	} else {
+	  print_bed_format();
+	  primers.clear();
+	  return primers;
+	}
+	break;
+      case 2:
+	if(std::all_of(cell.begin(), cell.end(), ::isdigit)) {
+	  p.set_end(std::stoul(cell) - 1 + offset); // Bed format - End is not 0 based
+	} else {
+	  print_bed_format();
+	  primers.clear();
+	  return primers;
+	}
+	break;
+      case 3:
+	p.set_name(cell);
+	break;
+      case 4:
+	if(std::all_of(cell.begin(), cell.end(), ::isdigit)) {
+	  p.set_score(stoi(cell));
+	} else {
+	  print_bed_format();  // score is missing, send warning but continue populating
+    std::cout << "\nWARNING: The BED file provided did not have the expected score column, but iVar will continue trimming\n" << std::endl;
+    p.set_score(-1);
+	}
+	break;
+      case 5:
+	if(cell[0] == '+' || cell[0] == '-')
+	  p.set_strand(cell[0]);
+	else {
+	  print_bed_format();
+	  primers.clear();
+	  return primers;
+	}
+      }
+      ctr++;
+    }
+    if(indice == 0 && ctr < 6)
+      std::cout << "Strand not found in primer BED file so strand will not be considered for trimming" << std::endl;
+    p.set_indice(indice);
+    p.set_pair_indice(-1);
+    p.set_read_count(0);
+    primers.push_back(p);
+    indice++;
+  }
+  std::cout << "Found " << primers.size() << " primers in BED file" << std::endl;
+  return primers;
 }
 
 std::vector<primer> populate_from_file(std::string path){
@@ -96,6 +164,7 @@ std::vector<primer> populate_from_file(std::string path){
     std::string cell;
     int ctr = 0;
     primer p;
+    p.set_strand(0);		// Set strand to NULL
     while(std::getline(lineStream,cell,'\t')){
       switch(ctr){
       case 0:
@@ -112,7 +181,7 @@ std::vector<primer> populate_from_file(std::string path){
 	break;
       case 2:
 	if(std::all_of(cell.begin(), cell.end(), ::isdigit)) {
-	  p.set_end(std::stoul(cell)-1); // Bed format - End is not 0 based
+	  p.set_end(std::stoul(cell) - 1); // Bed format - End is not 0 based
 	} else {
 	  print_bed_format();
 	  primers.clear();
@@ -126,25 +195,29 @@ std::vector<primer> populate_from_file(std::string path){
 	if(std::all_of(cell.begin(), cell.end(), ::isdigit)) {
 	  p.set_score(stoi(cell));
 	} else {
+	  print_bed_format();  // score is missing, send warning but continue populating
+    std::cout << "\nWARNING: The BED file provided did not have the expected score column, but iVar will continue trimming\n" << std::endl;
+    p.set_score(-1);
+	}
+	break;
+      case 5:
+	if(cell[0] == '+' || cell[0] == '-')
+	  p.set_strand(cell[0]);
+	else {
 	  print_bed_format();
 	  primers.clear();
 	  return primers;
 	}
-	break;
-      case 5:
-	p.set_strand(cell[0]);
       }
       ctr++;
     }
+    if(indice == 0 && ctr < 6)
+      std::cout << "Strand not found in primer BED file so strand will not be considered for trimming" << std::endl;
     p.set_indice(indice);
     p.set_pair_indice(-1);
     p.set_read_count(0);
     primers.push_back(p);
     indice++;
-  }
-  if(primers.size() == 0){
-    print_bed_format();
-    std::cout << "Found 0 primers in BED file" << std::endl;
   }
   std::cout << "Found " << primers.size() << " primers in BED file" << std::endl;
   return primers;
@@ -210,7 +283,6 @@ primer get_min_start(std::vector<primer> primers){
   auto minmax_start = std::minmax_element(primers.begin(), primers.end(), [] (primer lhs, primer rhs) {return lhs.get_start() < rhs.get_start();});
   return *(minmax_start.first);
 }
-
 
 primer get_max_end(std::vector<primer> primers){
   auto minmax_start = std::minmax_element(primers.begin(), primers.end(), [] (primer lhs, primer rhs) {return lhs.get_end() < rhs.get_end();});

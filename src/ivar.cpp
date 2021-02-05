@@ -16,12 +16,13 @@
 #include "suffix_tree.h"
 #include "get_common_variants.h"
 
-const std::string VERSION = "1.2";
+const std::string VERSION = "1.3.1";
 
 struct args_t {
   std::string bam;		// -i
   std::string bed;		// -b
   std::string text;		// -t
+  std::string seq_id; // -i for consensus
   std::string prefix;		// -p
   std::string ref;		// -r
   std::string region;		// -R
@@ -36,9 +37,11 @@ struct args_t {
   char gap;			// -n
   bool keep_min_coverage;	// -k
   std::string primer_pair_file;	// -f
+  int32_t primer_offset; // -x
   std::string file_list;		// -f
   bool write_no_primers_flag;	// -e
   std::string gff;		// -g
+  bool keep_for_reanalysis;     // -k
 } g_args;
 
 void print_usage(){
@@ -62,11 +65,16 @@ void print_trim_usage(){
     "Usage: ivar trim -i <input.bam> -b <primers.bed> -p <prefix> [-m <min-length>] [-q <min-quality>] [-s <sliding-window-width>]\n\n"
     "Input Options    Description\n"
     "           -i    (Required) Sorted bam file, with aligned reads, to trim primers and quality\n"
-    "           -b    (Required) BED file with primer sequences and positions\n"
+    "           -b    BED file with primer sequences and positions. If no BED file is specified, only quality trimming will be done.\n"
+    "           -f    [EXPERIMENTAL] Primer pair information file containing left and right primer names for the same amplicon separated by a tab\n"
+    "                 If provided, reads that do not fall within atleat one amplicon will be ignored prior to primer trimming.\n"
+    "           -x    Primer position offset (Default: 0). Reads that occur at the specified offset positions relative to primer positions will also be trimmed.\n"
     "           -m    Minimum length of read to retain after trimming (Default: 30)\n"
     "           -q    Minimum quality threshold for sliding window to pass (Default: 20)\n"
     "           -s    Width of sliding window (Default: 4)\n"
-    "           -e    Include reads with no primers. By default, reads with no primers are excluded\n\n"
+    "           -e    Include reads with no primers. By default, reads with no primers are excluded\n"
+    "           -k    Keep reads to allow for reanalysis: keep reads which would be dropped by\n"
+    "                 alignment length filter or primer requirements, but mark them QCFAIL\n\n"
     "Output Options   Description\n"
     "           -p    (Required) Prefix for the output BAM file\n";
 }
@@ -114,7 +122,8 @@ void print_consensus_usage(){
     "           -k    If '-k' flag is added, regions with depth less than minimum depth will not be added to the consensus sequence. Using '-k' will override any option specified using -n \n"
     "           -n    (N/-) Character to print in regions with less than minimum coverage(Default: N)\n\n"
     "Output Options   Description\n"
-    "           -p    (Required) Prefix for the output fasta file and quality file\n";
+    "           -p    (Required) Prefix for the output fasta file and quality file\n"
+    "           -i    (Optional) Name of fasta header. By default, the prefix is used to create the fasta header in the following format, Consensus_<prefix>_threshold_<frequency-threshold>_quality_<minimum-quality>\n";
 }
 
 void print_removereads_usage(){
@@ -158,9 +167,9 @@ void print_version_info(){
     "\nPlease raise issues and bug reports at https://github.com/andersen-lab/ivar/\n\n";
 }
 
-static const char *trim_opt_str = "i:b:p:m:q:s:eh?";
+static const char *trim_opt_str = "i:b:f:x:p:m:q:s:ekh?";
 static const char *variants_opt_str = "p:t:q:m:r:g:h?";
-static const char *consensus_opt_str = "p:q:t:m:n:kh?";
+static const char *consensus_opt_str = "i:p:q:t:m:n:kh?";
 static const char *removereads_opt_str = "i:p:t:b:h?";
 static const char *filtervariants_opt_str = "p:t:f:h?";
 static const char *getmasked_opt_str = "i:b:f:p:h?";
@@ -188,13 +197,13 @@ int main(int argc, char* argv[]){
     return -1;
   }
   std::stringstream cl_cmd;
-  cl_cmd << "@PG\tID:ivar-" << argv[1]  <<  "\tPN:ivar\tVN:1.0.0\tCL:" << argv[0] << " ";
+  cl_cmd << "@PG\tID:ivar-" << argv[1]  <<  "\tPN:ivar\tVN:" << VERSION << "\tCL:" << argv[0] << " ";
   for (int i = 1; i < argc; ++i) {
     cl_cmd << argv[i];
     if(i != argc-1)
       cl_cmd << " ";
   }
-  cl_cmd << "\n\0";  
+  cl_cmd << "\n\0";
   std::string cmd(argv[1]);
   if(cmd.compare("-v") == 0){
     print_version_info();
@@ -205,11 +214,16 @@ int main(int argc, char* argv[]){
   argv[1] = argv[0];
   argv++;
   argc--;
+  // ivar trim
   if (cmd.compare("trim") == 0){
     g_args.min_qual = 20;
     g_args.sliding_window = 4;
     g_args.min_length = 30;
     g_args.write_no_primers_flag = false;
+    g_args.keep_for_reanalysis = false;
+    g_args.bed = "";
+    g_args.primer_pair_file = "";
+    g_args.primer_offset = 0;
     opt = getopt( argc, argv, trim_opt_str);
     while( opt != -1 ) {
       switch( opt ) {
@@ -219,6 +233,12 @@ int main(int argc, char* argv[]){
       case 'b':
 	g_args.bed = optarg;
 	break;
+      case 'f':
+  g_args.primer_pair_file = optarg;
+  break;
+      case 'x':
+  g_args.primer_offset = std::stoi(optarg);
+  break;
       case 'p':
 	g_args.prefix = optarg;
 	break;
@@ -231,10 +251,13 @@ int main(int argc, char* argv[]){
       case 's':
 	g_args.sliding_window = std::stoi(optarg);
 	break;
-      case 'h':
       case 'e':
 	g_args.write_no_primers_flag = true;
 	break;
+      case 'k':
+        g_args.keep_for_reanalysis = true;
+        break;
+      case 'h':
       case '?':
 	print_trim_usage();
 	return -1;
@@ -242,13 +265,15 @@ int main(int argc, char* argv[]){
       }
       opt = getopt( argc, argv, trim_opt_str);
     }
-    if(g_args.bam.empty() || g_args.bed.empty() || g_args.prefix.empty()){
+    if(g_args.bam.empty() || g_args.prefix.empty()){
       print_trim_usage();
       return -1;
     }
     g_args.prefix = get_filename_without_extension(g_args.prefix,".bam");
-    res = trim_bam_qual_primer(g_args.bam, g_args.bed, g_args.prefix, g_args.region, g_args.min_qual, g_args.sliding_window, cl_cmd.str(), g_args.write_no_primers_flag, g_args.min_length);
-  } else if (cmd.compare("variants") == 0){
+    res = trim_bam_qual_primer(g_args.bam, g_args.bed, g_args.prefix, g_args.region, g_args.min_qual, g_args.sliding_window, cl_cmd.str(), g_args.write_no_primers_flag, g_args.keep_for_reanalysis, g_args.min_length, g_args.primer_pair_file, g_args.primer_offset);
+  }
+  // ivar variants
+  else if (cmd.compare("variants") == 0){
     g_args.min_qual = 20;
     g_args.min_threshold = 0.03;
     g_args.min_depth = 0;
@@ -304,8 +329,11 @@ int main(int argc, char* argv[]){
       return -1;
     }
     res = call_variants_from_plup(std::cin, g_args.prefix, g_args.min_qual, g_args.min_threshold, g_args.min_depth, g_args.ref, g_args.gff);
-  } else if (cmd.compare("consensus") == 0){
+  }
+  // ivar consensus
+  else if (cmd.compare("consensus") == 0){
     opt = getopt( argc, argv, consensus_opt_str);
+    g_args.seq_id = "";
     g_args.min_threshold = 0;
     g_args.min_depth = 10;
     g_args.gap = 'N';
@@ -315,6 +343,9 @@ int main(int argc, char* argv[]){
       switch( opt ) {
       case 't':
 	g_args.min_threshold = atof(optarg);
+	break;
+      case 'i':
+	g_args.seq_id = optarg;
 	break;
       case 'p':
 	g_args.prefix = optarg;
@@ -359,7 +390,7 @@ int main(int argc, char* argv[]){
       std::cout << "Regions with depth less than minimum depth will not added to consensus" << std::endl;
     else
       std::cout << "Regions with depth less than minimum depth covered by: " << g_args.gap << std::endl;
-    res = call_consensus_from_plup(std::cin, g_args.prefix, g_args.min_qual, g_args.min_threshold, g_args.min_depth, g_args.gap, g_args.keep_min_coverage);
+    res = call_consensus_from_plup(std::cin, g_args.seq_id, g_args.prefix, g_args.min_qual, g_args.min_threshold, g_args.min_depth, g_args.gap, g_args.keep_min_coverage);
   } else if (cmd.compare("removereads") == 0){
     opt = getopt( argc, argv, removereads_opt_str);
     while( opt != -1 ) {
@@ -469,7 +500,7 @@ int main(int argc, char* argv[]){
 	break;
       case 'f':
 	g_args.primer_pair_file = optarg;
-	break;	
+	break;
       case 'p':
 	g_args.prefix = optarg;
 	break;
